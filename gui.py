@@ -77,10 +77,13 @@ class WaddenKaartApp:
         tk.Frame(parent, bg=ACCENT, height=1).pack(fill="x", padx=8)
 
     def _knop(self, parent, tekst, cmd, **kw):
+        kw.setdefault("bg", KNOP_BG)
+        kw.setdefault("fg", KNOP_FG)
+        kw.setdefault("activebackground", ACCENT)
+        kw.setdefault("activeforeground", "white")
         return tk.Button(parent, text=tekst, command=cmd,
-                         bg=KNOP_BG, fg=KNOP_FG, relief="flat",
-                         font=("Segoe UI", 9), cursor="hand2",
-                         activebackground=ACCENT, activeforeground="white", **kw)
+                         relief="flat", font=("Segoe UI", 9), cursor="hand2",
+                         **kw)
 
     def _bouw_linker_paneel(self, parent):
         # Titel
