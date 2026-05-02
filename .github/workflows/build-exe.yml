@@ -1,0 +1,54 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Python 3.11 instellen
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Dependencies installeren
+        run: pip install -r requirements.txt pyinstaller
+
+      - name: EXE bouwen met PyInstaller
+        run: |
+          pyinstaller --onefile --windowed `
+            --name "WaddenKaartGenerator" `
+            --add-data "config.py;." `
+            --hidden-import "contourpy" `
+            --hidden-import "pyproj" `
+            --hidden-import "tifffile" `
+            --hidden-import "PIL._tkinter_finder" `
+            --hidden-import "numpy" `
+            --collect-all "pyproj" `
+            main.py
+
+      - name: EXE uploaden als artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WaddenKaartGenerator-windows
+          path: dist/WaddenKaartGenerator.exe
+          retention-days: 30
+
+      - name: Release aanmaken
+        uses: softprops/action-gh-release@v2
+        if: github.ref == 'refs/heads/main'
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: "Build ${{ github.run_number }}"
+          body: "Automatische build van commit ${{ github.sha }}"
+          files: dist/WaddenKaartGenerator.exe
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
