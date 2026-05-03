@@ -1,22 +1,15 @@
 import math
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
-from processing.contour import maak_dieptekaart_array
-from config import (KLEUR_VAARWEG, KLEUR_BOEI_ROOD, KLEUR_BOEI_GROEN,
-                    KLEUR_BOEI_GEEL, KLEUR_PIJL, BOEI_TYPE)
+from PIL import Image, ImageDraw
+from processing.contour import nap_naar_lat_cm, maak_dieptekaart_rgba
+from config import KLEUR_VAARWEG, KLEUR_BOEI_ROOD, KLEUR_BOEI_GROEN, KLEUR_BOEI_GEEL, KLEUR_PIJL, BOEI_TYPE
 
 KAART_B = 800
 KAART_H = 400
 
 
 def _lon_lat_naar_px(lon, lat, bbox, rotatie_graden=0):
-    """Projecteert lon/lat naar (x, y) pixel in 800×400."""
     lonMin, latMin, lonMax, latMax = bbox
-
-    # Correctie voor breedtegraad distortie (Mercator-achtig)
-    lat_midden = (latMin + latMax) / 2
-    lon_schaal = math.cos(math.radians(lat_midden))
-
     nx = (lon - lonMin) / (lonMax - lonMin)
     ny = 1.0 - (lat - latMin) / (latMax - latMin)
 
@@ -52,6 +45,7 @@ def teken_kaart(
     rotatie_graden=0,
     getij_cm=0,
     lat_offset_cm=-175,
+    achtergrond_img=None,
     vaarwegen=None,
     boeien=None,
     stroming=None,
@@ -64,24 +58,35 @@ def teken_kaart(
     buffer_cm=50,
 ):
     """
-    Rendert een 800×400 PIL Image met alle gevraagde lagen.
-    Geeft een PIL.Image.RGB terug.
+    Rendert een 800x400 PIL Image RGB met alle lagen:
+      1. Achtergrond: PDOK WMS (land/IJsselmeer/Afsluitdijk) of donkerblauw
+      2. Dieptekaart: RGBA semi-transparant over achtergrond
+      3. Vaarwegen, boeien, stromingspijlen
+      4. Windroos + legenda + diepgang-indicator
     """
+    # ── Laag 1: achtergrond (WMS of donkerblauw) ─────────────────────────────
+    if achtergrond_img is not None:
+        if achtergrond_img.size != (KAART_B, KAART_H):
+            achtergrond_img = achtergrond_img.resize((KAART_B, KAART_H), Image.LANCZOS)
+        canvas = achtergrond_img.copy().convert("RGBA")
+    else:
+        canvas = Image.new("RGBA", (KAART_B, KAART_H), (20, 40, 80, 255))
+
+    # ── Laag 2: dieptekaart (RGBA semi-transparant) ──────────────────────────
     if bathymetrie_grid is not None and lons is not None and bbox is not None:
-        from processing.contour import nap_naar_lat_cm
         diepte_grid = nap_naar_lat_cm(bathymetrie_grid, lat_offset_cm)
-        rgb_array = maak_dieptekaart_array(
+        rgba_arr = maak_dieptekaart_rgba(
             lons, lats, diepte_grid,
+            lat_offset_cm=lat_offset_cm,
             getij_cm=getij_cm,
             breedte=KAART_B, hoogte=KAART_H,
         )
-        img = Image.fromarray(rgb_array, "RGB")
-    else:
-        img = Image.new("RGB", (KAART_B, KAART_H), (20, 40, 80))
+        canvas = Image.alpha_composite(canvas, Image.fromarray(rgba_arr, "RGBA"))
 
+    img = canvas.convert("RGB")
     draw = ImageDraw.Draw(img)
 
-    # Vaarwegen
+    # ── Laag 3: vaarwegen ────────────────────────────────────────────────────
     if toon_vaarwegen and vaarwegen and bbox:
         for lijn in vaarwegen:
             if len(lijn) < 2:
@@ -91,73 +96,74 @@ def teken_kaart(
             pixels = [(x, y) for x, y in pixels
                       if -50 <= x <= KAART_B + 50 and -50 <= y <= KAART_H + 50]
             if len(pixels) >= 2:
-                draw.line(pixels, fill=KLEUR_VAARWEG, width=1)
+                draw.line(pixels, fill=KLEUR_VAARWEG, width=2)
 
-    # Boeien
+    # ── Laag 4: boeien ───────────────────────────────────────────────────────
     if toon_boeien and boeien and bbox:
         for boei in boeien:
             x, y = _lon_lat_naar_px(boei["lon"], boei["lat"], bbox, rotatie_graden)
             if 0 <= x < KAART_B and 0 <= y < KAART_H:
                 kleur = _boei_kleur(boei["type"])
-                draw.ellipse((x - 3, y - 3, x + 3, y + 3), fill=kleur)
+                draw.ellipse((x - 3, y - 3, x + 3, y + 3),
+                             fill=kleur, outline=(0, 0, 0))
 
-    # Stromingspijlen
+    # ── Laag 5: stromingspijlen ──────────────────────────────────────────────
     if toon_stroming and stroming and bbox:
         from processing.stroomatlas import stroming_op_tijdstip
-        vectoren = stroming_op_tijdstip(stroming, tijdstap_index)
-        for lon, lat, velu, velv in vectoren:
+        for lon, lat, velu, velv in stroming_op_tijdstip(stroming, tijdstap_index):
             x, y = _lon_lat_naar_px(lon, lat, bbox, rotatie_graden)
             if not (0 <= x < KAART_B and 0 <= y < KAART_H):
                 continue
-
             snelheid = math.sqrt(velu ** 2 + velv ** 2)
-            if snelheid < 0.01:
+            if snelheid < 0.05:
                 continue
-
-            # Schaal pijllengte: 1 m/s = 20 px
             schaal = min(20 * snelheid, 30)
             richting_rad = math.atan2(velu, velv) + math.radians(rotatie_graden)
             dx = schaal * math.sin(richting_rad)
             dy = -schaal * math.cos(richting_rad)
-
             x2, y2 = int(x + dx), int(y + dy)
-            draw.line((x, y, x2, y2), fill=KLEUR_PIJL, width=1)
-            # Pijlpunt
+            draw.line((x, y, x2, y2), fill=KLEUR_PIJL, width=2)
             draw.ellipse((x2 - 2, y2 - 2, x2 + 2, y2 + 2), fill=KLEUR_PIJL)
 
-    # Windroos
+    # ── Laag 6: windroos ─────────────────────────────────────────────────────
     if toon_windroos:
         _teken_windroos(draw, rotatie_graden)
 
-    # Veiligheids-indicator diepgang
-    if bathymetrie_grid is not None:
-        min_diepte_cm = diepgang_cm + buffer_cm
-        _teken_diepgang_overlay(draw, min_diepte_cm)
+    # ── Laag 7: diepgang-indicator + legenda ─────────────────────────────────
+    min_diepte_cm = diepgang_cm + buffer_cm
+    draw.rectangle((5, KAART_H - 20, 175, KAART_H - 4), fill=(0, 0, 0))
+    draw.text((8, KAART_H - 18), f"Min.diepte: {min_diepte_cm} cm", fill=(255, 255, 180))
+
+    _teken_legenda(draw)
 
     return img
 
 
 def _teken_windroos(draw, rotatie_graden):
-    """Tekent een eenvoudige windroos/noordpijl in de rechteronderhoek."""
-    cx, cy = KAART_B - 35, KAART_H - 35
+    cx, cy = KAART_B - 35, 35
     r = 20
     rad = math.radians(-rotatie_graden)
-
-    # Noord-pijl
     nx = cx + r * math.sin(rad)
     ny = cy - r * math.cos(rad)
-    draw.line((cx, cy, int(nx), int(ny)), fill=(255, 80, 80), width=2)
+    draw.ellipse((cx - r, cy - r, cx + r, cy + r), outline=(180, 180, 180), width=1)
+    draw.line((cx, cy, int(nx), int(ny)), fill=(220, 60, 60), width=2)
     draw.ellipse((cx - 3, cy - 3, cx + 3, cy + 3), fill=(200, 200, 200))
-
-    # N label
-    draw.text((int(nx) - 4, int(ny) - 10), "N", fill=(255, 80, 80))
-
-    # Cirkel
-    draw.ellipse((cx - r, cy - r, cx + r, cy + r), outline=(150, 150, 150), width=1)
+    draw.text((int(nx) - 4, int(ny) - 12), "N", fill=(220, 60, 60))
 
 
-def _teken_diepgang_overlay(draw, min_diepte_cm):
-    """Tekent een info-label met minimale diepte onderin links."""
-    tekst = f"Min.diepte: {min_diepte_cm}cm"
-    draw.rectangle((5, KAART_H - 20, 160, KAART_H - 4), fill=(0, 0, 0, 128))
-    draw.text((8, KAART_H - 18), tekst, fill=(255, 255, 200))
+def _teken_legenda(draw):
+    items = [
+        ((210, 190, 145), "Land/dijk"),
+        ((235, 215, 160), "Droogval"),
+        ((160, 220, 210), "< 1m"),
+        ((80,  160, 210), "1-3m"),
+        ((40,  100, 175), "3-6m"),
+        ((15,   50, 130), "> 6m"),
+    ]
+    x0 = KAART_B - 90
+    y0 = KAART_H - 6 - len(items) * 14
+    draw.rectangle((x0 - 4, y0 - 4, KAART_B - 3, KAART_H - 24), fill=(0, 0, 0))
+    for i, (kleur, label) in enumerate(items):
+        y = y0 + i * 14
+        draw.rectangle((x0, y, x0 + 10, y + 10), fill=kleur)
+        draw.text((x0 + 13, y), label, fill=(220, 220, 220))

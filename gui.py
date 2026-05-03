@@ -34,10 +34,11 @@ class WaddenKaartApp:
         self.bathymetrie_grid = None
         self.lons = None
         self.lats = None
-        self.vaarwegen  = None
-        self.boeien     = None
-        self.atlas_lw   = None
-        self.atlas_hw   = None
+        self.vaarwegen    = None
+        self.boeien       = None
+        self.atlas_lw     = None
+        self.atlas_hw     = None
+        self.achtergrond  = None   # PDOK WMS achtergrond (PIL Image)
         self.actief_gebied = "wadden_west"
         self.export_map = ""
 
@@ -109,16 +110,18 @@ class WaddenKaartApp:
 
         self._knop(frame_knoppen, "Alles ophalen", self._haal_alles_op,
                    width=14).grid(row=0, column=0, padx=2, pady=2)
-        self._knop(frame_knoppen, "Bathymetrie", self._haal_batho_op,
+        self._knop(frame_knoppen, "Achtergrond",  self._haal_achtergrond_op,
                    width=12).grid(row=0, column=1, padx=2, pady=2)
-        self._knop(frame_knoppen, "Vaarwegen",   self._haal_vaarwegen_op,
+        self._knop(frame_knoppen, "Bathymetrie",  self._haal_batho_op,
                    width=12).grid(row=1, column=0, padx=2, pady=2)
-        self._knop(frame_knoppen, "Boeien",      self._haal_boeien_op,
+        self._knop(frame_knoppen, "Vaarwegen",    self._haal_vaarwegen_op,
                    width=12).grid(row=1, column=1, padx=2, pady=2)
-        self._knop(frame_knoppen, "Stroming LW", self._haal_stroming_lw,
+        self._knop(frame_knoppen, "Boeien",       self._haal_boeien_op,
                    width=12).grid(row=2, column=0, padx=2, pady=2)
-        self._knop(frame_knoppen, "Stroming HW", self._haal_stroming_hw,
+        self._knop(frame_knoppen, "Stroming LW",  self._haal_stroming_lw,
                    width=12).grid(row=2, column=1, padx=2, pady=2)
+        self._knop(frame_knoppen, "Stroming HW",  self._haal_stroming_hw,
+                   width=12).grid(row=3, column=0, padx=2, pady=2)
 
         # Weergave instellingen
         self._sectie(parent, "WEERGAVE")
@@ -289,6 +292,7 @@ class WaddenKaartApp:
             rotatie_graden=gebied["rotatie_graden"],
             getij_cm=self.getij_var.get(),
             lat_offset_cm=gebied["lat_offset_cm"],
+            achtergrond_img=self.achtergrond,
             vaarwegen=self.vaarwegen,
             boeien=self.boeien,
             stroming=stroming,
@@ -313,19 +317,31 @@ class WaddenKaartApp:
     def _worker_alles(self):
         self._bericht("=== Alle data ophalen ===", voortgang=0)
         try:
-            self._bericht("1/5 Bathymetrie...", voortgang=10)
+            self._bericht("1/6 Achtergrond (land/water)...", voortgang=5)
+            self._doe_achtergrond()
+            self._bericht("2/6 Bathymetrie...", voortgang=15)
             self._doe_bathymetrie()
-            self._bericht("2/5 Vaarwegen...", voortgang=30)
+            self._bericht("3/6 Vaarwegen...", voortgang=35)
             self._doe_vaarwegen()
-            self._bericht("3/5 Boeien...", voortgang=50)
+            self._bericht("4/6 Boeien...", voortgang=52)
             self._doe_boeien()
-            self._bericht("4/5 Stroming LW...", voortgang=65)
+            self._bericht("5/6 Stroming LW...", voortgang=65)
             self._doe_stroming("lw")
-            self._bericht("5/5 Stroming HW...", voortgang=80)
+            self._bericht("6/6 Stroming HW...", voortgang=82)
             self._doe_stroming("hw")
             self._bericht("Klaar! Alle data opgehaald.", voortgang=100, herteken=True)
         except Exception as e:
             self._bericht(f"FOUT: {e}", voortgang=0)
+
+    def _haal_achtergrond_op(self):
+        threading.Thread(target=self._doe_achtergrond_thread, daemon=True).start()
+
+    def _doe_achtergrond_thread(self):
+        try:
+            self._doe_achtergrond()
+            self._bericht("Achtergrond klaar.", voortgang=100, herteken=True)
+        except Exception as e:
+            self._bericht(f"FOUT achtergrond: {e}")
 
     def _haal_batho_op(self):
         threading.Thread(target=self._doe_bathymetrie_thread, daemon=True).start()
@@ -371,6 +387,13 @@ class WaddenKaartApp:
             self._bericht(f"FOUT stroming {atlas}: {e}")
 
     # ── Interne data workers ───────────────────────────────────────────────────
+
+    def _doe_achtergrond(self):
+        from api.landmassa import haal_achtergrond_wms
+        gebied = config.GEBIEDEN[self.actief_gebied]
+        self.achtergrond = haal_achtergrond_wms(
+            gebied["bbox"], breedte=800, hoogte=400, callback=self._bericht
+        )
 
     def _doe_bathymetrie(self):
         from api.bathymetrie import haal_bathymetrie_op

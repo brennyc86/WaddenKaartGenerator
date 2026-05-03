@@ -5,29 +5,29 @@ from config import DIEPTE_NIVEAUS_CM
 
 def nap_naar_lat_cm(grid_nap_m, lat_offset_cm):
     """
-    Converteert NAP hoogte (m) naar diepte t.o.v. LAT (cm).
-    Positief = boven LAT = potentieel water.
-    lat_offset_cm: negatief getal (LAT is onder NAP).
+    Converteert NAP hoogte (m float) naar diepte t.o.v. LAT (cm).
+    Resultaat:
+      positief  = ONDER LAT = altijd water (diepte in cm)
+      negatief  = BOVEN LAT = land of droogvallend gebied
+    lat_offset_cm: negatief getal, bijv. -175 (LAT is 175 cm onder NAP)
     """
     grid_nap_cm = grid_nap_m * 100
-    # Diepte t.o.v. LAT: negatief = droog (boven LAT), positief = water
-    diepte_lat_cm = -(grid_nap_cm - lat_offset_cm)
-    return diepte_lat_cm
+    return -(grid_nap_cm - lat_offset_cm)
 
 
 def bereken_contourlijnen(lons, lats, diepte_lat_cm_grid, niveaus_cm=None, callback=None):
     """
     Berekent contourlijnen via contourpy (Marching Squares).
     lons: 1D array lengte W
-    lats: 1D array lengte H (N→Z, dus aflopend — contourpy accepteert dit)
-    diepte_lat_cm_grid: 2D array (H, W), positief = water
+    lats: 1D array lengte H
+    diepte_lat_cm_grid: 2D array (H, W), positief = water onder LAT
     niveaus_cm: lijst van diepteniveaus in cm t.o.v. LAT
     Geeft terug: dict {niveau_cm: [[(lon, lat), ...], ...]}
     """
     if niveaus_cm is None:
         niveaus_cm = DIEPTE_NIVEAUS_CM
 
-    # contourpy verwacht lats stijgend; flip als nodig
+    # contourpy verwacht lats stijgend
     if len(lats) > 1 and lats[0] > lats[-1]:
         lats = lats[::-1]
         diepte_lat_cm_grid = diepte_lat_cm_grid[::-1, :]
@@ -43,7 +43,6 @@ def bereken_contourlijnen(lons, lats, diepte_lat_cm_grid, niveaus_cm=None, callb
         try:
             lijnen = cgen.lines(niveau)
             if lijnen:
-                # Elke lijn is een (N,2) array met [lon, lat] kolommen
                 resultaat[niveau] = [
                     [(pt[0], pt[1]) for pt in lijn]
                     for lijn in lijnen
@@ -58,48 +57,74 @@ def bereken_contourlijnen(lons, lats, diepte_lat_cm_grid, niveaus_cm=None, callb
     return resultaat
 
 
-def maak_dieptekaart_array(lons, lats, diepte_lat_cm_grid, getij_cm=0,
-                            breedte=800, hoogte=400):
+def maak_dieptekaart_rgba(lons, lats, diepte_lat_cm_grid, lat_offset_cm=-175,
+                           getij_cm=0, breedte=800, hoogte=400):
     """
-    Maakt een RGB uint8 array (hoogte×breedte×3) voor directe weergave.
-    Kleurt pixels op basis van diepte t.o.v. actuele waterstand.
-    getij_cm: huidige getijhoogte t.o.v. NAP in cm (verschuift waterstand).
-    """
-    from config import (KLEUR_DIEP, KLEUR_MEDIUM, KLEUR_ONDIEP,
-                        KLEUR_DROOGVAL, KLEUR_LAND)
+    Maakt een RGBA uint8 array (hoogte×breedte×4) voor alpha-compositing
+    over een achtergrondkaart (PDOK WMS).
 
-    # Resample grid naar schermgrootte
+    Diepteformule:
+      effectieve_diepte = diepte_lat_cm + (getij_cm - lat_offset_cm)
+      > 0  = water (diepte in cm)
+      < 0  = droog (hoogte boven huidig waterpeil in cm)
+
+    Nautisch kleurenschema (semi-transparant over WMS):
+      land/dijk (> 2m boven water)  : beige, alpha 160
+      droogval  (0..2m boven water) : zandgeel, alpha 180
+      0-1m water                    : lichtturquoise, alpha 190
+      1-3m water                    : lichtblauw, alpha 200
+      3-6m water                    : middenblauw, alpha 210
+      > 6m water                    : donkerblauw, alpha 220
+    """
+    # Resample naar schermgrootte
     rij_idx = np.linspace(0, diepte_lat_cm_grid.shape[0] - 1, hoogte).astype(int)
     kol_idx = np.linspace(0, diepte_lat_cm_grid.shape[1] - 1, breedte).astype(int)
-    grid_scherm = diepte_lat_cm_grid[np.ix_(rij_idx, kol_idx)]
+    grid = diepte_lat_cm_grid[np.ix_(rij_idx, kol_idx)]
 
-    # Pas getij toe: hogere waterstand = meer water
-    waterstand = grid_scherm + getij_cm
+    nan_masker = np.isnan(grid)
 
-    rgb = np.zeros((hoogte, breedte, 3), dtype=np.uint8)
+    # Effectieve diepte bij huidig getij
+    # water_boven_lat: hoeveel cm de waterstand boven LAT staat bij huidig getij
+    water_boven_lat = getij_cm - lat_offset_cm   # bijv. 0 - (-175) = 175 cm bij getij=0
+    eff = grid + water_boven_lat                  # > 0 = water; < 0 = droog
 
-    # Land (> +500 cm boven LAT)
-    land = waterstand > 500
-    rgb[land] = KLEUR_LAND
+    rgba = np.zeros((hoogte, breedte, 4), dtype=np.uint8)
 
-    # Droogvallend (0..500 cm, alleen bij laagwater)
-    droog = (waterstand >= 0) & (waterstand <= 500) & ~land
-    rgb[droog] = KLEUR_DROOGVAL
+    # Land / dijk: > 200cm boven huidig waterpeil
+    m = (~nan_masker) & (eff < -200)
+    rgba[m] = (210, 190, 145, 160)
 
-    # Ondiep (< -10 cm = 10 cm water diepte)
-    ondiep = (waterstand < 0) & (waterstand >= -200)
-    rgb[ondiep] = KLEUR_ONDIEP
+    # Droogvallend: 0..200cm boven waterpeil (wadplaten e.d.)
+    m = (~nan_masker) & (eff >= -200) & (eff < 0)
+    rgba[m] = (235, 215, 160, 185)
 
-    # Medium (200..500 cm diep)
-    medium = (waterstand < -200) & (waterstand >= -500)
-    rgb[medium] = KLEUR_MEDIUM
+    # 0–100 cm water (zeer ondiep)
+    m = (~nan_masker) & (eff >= 0) & (eff < 100)
+    rgba[m] = (160, 220, 210, 190)
 
-    # Diep
-    diep = waterstand < -500
-    rgb[diep] = KLEUR_DIEP
+    # 100–300 cm water (ondiep)
+    m = (~nan_masker) & (eff >= 100) & (eff < 300)
+    rgba[m] = (80, 160, 210, 200)
 
-    # NaN = geen data
-    nan_mask = np.isnan(grid_scherm)
-    rgb[nan_mask] = (40, 40, 40)
+    # 300–600 cm water (medium)
+    m = (~nan_masker) & (eff >= 300) & (eff < 600)
+    rgba[m] = (40, 100, 175, 210)
 
-    return rgb
+    # > 600 cm water (diep)
+    m = (~nan_masker) & (eff >= 600)
+    rgba[m] = (15, 50, 130, 220)
+
+    # NaN = volledig transparant (WMS achtergrond schijnt door)
+    rgba[nan_masker] = (0, 0, 0, 0)
+
+    return rgba
+
+
+# Achterwaartse compatibiliteit voor export-code die nog RGB verwacht
+def maak_dieptekaart_array(lons, lats, diepte_lat_cm_grid, lat_offset_cm=-175,
+                            getij_cm=0, breedte=800, hoogte=400):
+    rgba = maak_dieptekaart_rgba(lons, lats, diepte_lat_cm_grid,
+                                  lat_offset_cm=lat_offset_cm,
+                                  getij_cm=getij_cm,
+                                  breedte=breedte, hoogte=hoogte)
+    return rgba[:, :, :3]
